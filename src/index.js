@@ -24,12 +24,36 @@ function createTextElement(text) {
   };
 }
 
-const Didact = {
+/**
+ * 将ReactElement渲染为真实dom并挂载到dom树
+ * @param {*} element ReactElement
+ * @param {*} container 父元素
+ */
+function render(element, container) {
+  const { type, props } = element;
+  let node = document.createTextNode(props.nodeValue);
+  if (type !== 'TEXT_ELEMENT') {
+    node = document.createElement(type);
+    // 设置属性节点
+    Object.keys(props).forEach((key) => {
+      if (key !== 'children') {
+        node[key] = props[key];
+      }
+    });
+    // 递归创建子节点
+    props.children.forEach((child) => render(child, node));
+  }
+  // 后序遍历，最后将整个dom树挂在到文档
+  container.appendChild(node);
+}
+
+const MyReact = {
   createElement,
+  render,
 };
 
 // babel-plugin-react-jsx插件提供的注释，可指定自定义jsx转换方法
-/** @jsx Didact.createElement */
+/** @jsx MyReact.createElement */
 const element = (
   <div id="foo">
     <a id="bar" href="javascript;">
@@ -46,3 +70,6 @@ const element = (
 );
 
 console.log(element);
+
+const container = document.querySelector('#root');
+MyReact.render(element, container);
