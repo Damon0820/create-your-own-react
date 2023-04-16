@@ -58,9 +58,6 @@ function performUnitOfWork(fiber) {
   if (!fiber.dom) {
     fiber.dom = createDom(fiber);
   }
-  if (fiber.parent) {
-    fiber.parent.dom.appendChild(fiber.dom);
-  }
   // 2
   const elements = fiber.props.children;
   let index = 0;
@@ -96,7 +93,29 @@ function performUnitOfWork(fiber) {
   return null;
 }
 
+/**
+ * 将 workInProcess root fiber 生成对应的 dom
+ */
+function commitRoot() {
+  commitWork(wipRoot.child);
+  wipRoot = null;
+}
+
+/**
+ * 将 fiber 生成对应的 dom，并挂载到父节点。递归处理子兄节点
+ */
+function commitWork(fiber) {
+  if (!fiber) {
+    return;
+  }
+  const parentDom = fiber.parent.dom;
+  parentDom.appendChild(fiber.dom);
+  commitWork(fiber.child);
+  commitWork(fiber.sibling);
+}
+
 let nextUnitOfWork = null;
+let wipRoot = null;
 function workLoop(deadline) {
   let shouldYield = false;
   while (nextUnitOfWork && !shouldYield) {
@@ -104,12 +123,15 @@ function workLoop(deadline) {
     shouldYield = deadline.timeRemaining() < 1;
     console.log('nextUnitOfWork', nextUnitOfWork);
   }
-  nextUnitOfWork && requestIdleCallback(workLoop);
+  if (nextUnitOfWork) {
+    requestIdleCallback(workLoop);
+  } else if (!nextUnitOfWork && wipRoot) {
+    commitRoot();
+  }
 }
-
 function render(element, container) {
   // root fiber
-  nextUnitOfWork = {
+  wipRoot = nextUnitOfWork = {
     dom: container,
     props: {
       children: [element],
