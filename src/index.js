@@ -44,6 +44,49 @@ function createDom(element, container) {
   return node;
 }
 
+const isEvent = (key) => key.startWith('on');
+const isProperty = (key) => key !== 'children' && !isEvent(key);
+const isNewOrChange = (prevProps, nextProps) => (key) =>
+  prevProps[key] !== nextProps[key];
+const isGone = (prevProps, nextProps) => (key) => !(key in nextProps);
+
+/**
+ * 更新 dom 属性
+ */
+function updateDom(dom, prevProps, nextProps) {
+  // 移除老属性
+  Object.keys(prevProps)
+    .filter(isProperty)
+    .filter(isGone(prevProps, nextProps))
+    .forEach((key) => {
+      dom[key] = '';
+    });
+
+  // 更新新属性
+  Object.keys(nextProps)
+    .filter(isProperty)
+    .filter(isNewOrChange(prevProps, nextProps))
+    .forEach((key) => {
+      dom[key] = nextProps[key];
+    });
+
+  // 移除老事件
+  Object.keys(prevProps)
+    .filter(isEvent)
+    .filter(isGone(prevProps, nextProps))
+    .forEach((key) => {
+      dom.removeEventListener(key.toLowerCase().slice(2), prevProps[key]);
+    });
+  // 更新新事件
+  Object.keys(nextProps)
+    .filter(isProperty)
+    .filter(isNewOrChange(prevProps, nextProps))
+    .forEach((key) => {
+      dom.removeEventListener(key.toLowerCase().slice(2), prevProps[key]);
+      dom.addEventListener(key.toLowerCase().slice(2), nextProps[key]);
+    });
+}
+
 /**
  * 执行工作单元
  * 1. 创建dom并挂在到父dom节点
@@ -60,24 +103,7 @@ function performUnitOfWork(fiber) {
   }
   // 2
   const elements = fiber.props.children;
-  let index = 0;
-  let prevSibling = null;
-  while (index < elements.length) {
-    const element = elements[index];
-    const newFiber = {
-      type: element.type,
-      props: element.props,
-      parent: fiber,
-      dom: null,
-    };
-    if (index === 0) {
-      fiber.child = newFiber;
-    } else {
-      prevSibling.sibling = newFiber;
-    }
-    prevSibling = newFiber;
-    index++;
-  }
+  reconcileChildren(fiber, elements);
 
   // 3
   if (fiber.child) {
@@ -94,11 +120,71 @@ function performUnitOfWork(fiber) {
 }
 
 /**
+ * 当对 fiber 节点的子节点 和 fiber.props.children 对比
+ * 比对的过程中，提前一步将子 ReactElement 生成为对应新的 fiber 节点。从而达到同时构建 fiber tree.
+ */
+function reconcileChildren(wipFiber, elements) {
+  let index = 0;
+  let prevSibling = null;
+  let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
+  while (index < elements.length || oldFiber !== null) {
+    const element = elements[index];
+    let newFiber = null;
+    const sameType = oldFiber && element && oldFiber.type === element.type;
+
+    // update
+    if (sameType) {
+      newFiber = {
+        type: element.type,
+        props: element.props,
+        parent: wipFiber,
+        dom: oldFiber.dom,
+        alternate: oldFiber,
+        effectTag: 'UPDATE',
+      };
+    }
+
+    // create
+    if (element && !sameType) {
+      newFiber = {
+        type: element.type,
+        props: element.props,
+        parent: wipFiber,
+        dom: null,
+        alternate: null,
+        effectTag: 'PLACEMENT',
+      };
+    }
+
+    // delete
+    if (oldFiber && !sameType) {
+      oldFiber.effectTag = 'DELETION';
+      deletions.push(oldFiber);
+    }
+
+    if (oldFiber) {
+      oldFiber = oldFiber.sibling;
+    }
+
+    if (index === 0) {
+      wipFiber.child = newFiber;
+    } else {
+      prevSibling.sibling = newFiber;
+    }
+    prevSibling = newFiber;
+    index++;
+  }
+}
+
+/**
  * 将 workInProcess root fiber 生成对应的 dom
  */
 function commitRoot() {
+  deletions.forEach(commitWork);
   commitWork(wipRoot.child);
+  currentRoot = wipRoot;
   wipRoot = null;
+  deletions = [];
 }
 
 /**
@@ -109,13 +195,23 @@ function commitWork(fiber) {
     return;
   }
   const parentDom = fiber.parent.dom;
-  parentDom.appendChild(fiber.dom);
+  if (fiber.effectTag === 'PLACEMENT' && fiber.dom !== null) {
+    parentDom.appendChild(fiber.dom);
+  } else if (fiber.effectTag === 'UPDATE' && fiber.dom !== null) {
+    // 更新属性
+    updateDom(fiber.dom, fiber.alternate.props, fiber.props);
+  } else if (fiber.effectTag === 'DELETION') {
+    parentDom.removeChild(fiber.dom);
+  }
   commitWork(fiber.child);
   commitWork(fiber.sibling);
 }
 
 let nextUnitOfWork = null;
 let wipRoot = null;
+let currentRoot = null;
+let deletions = [];
+
 function workLoop(deadline) {
   let shouldYield = false;
   while (nextUnitOfWork && !shouldYield) {
@@ -136,6 +232,7 @@ function render(element, container) {
     props: {
       children: [element],
     },
+    alternate: currentRoot,
   };
   requestIdleCallback(workLoop);
 }
