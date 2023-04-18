@@ -31,20 +31,15 @@ function createTextElement(text) {
  */
 function createDom(element, container) {
   const { type, props } = element;
-  let node = document.createTextNode(props.nodeValue);
-  if (type !== 'TEXT_ELEMENT') {
-    node = document.createElement(type);
-    // 设置属性节点
-    Object.keys(props).forEach((key) => {
-      if (key !== 'children') {
-        node[key] = props[key];
-      }
-    });
-  }
-  return node;
+  let dom =
+    type === 'TEXT_ELEMENT'
+      ? document.createTextNode(props.nodeValue)
+      : document.createElement(type);
+  updateDom(dom, {}, element.props);
+  return dom;
 }
 
-const isEvent = (key) => key.startWith('on');
+const isEvent = (key) => key.startsWith('on');
 const isProperty = (key) => key !== 'children' && !isEvent(key);
 const isNewOrChange = (prevProps, nextProps) => (key) =>
   prevProps[key] !== nextProps[key];
@@ -79,12 +74,74 @@ function updateDom(dom, prevProps, nextProps) {
     });
   // 更新新事件
   Object.keys(nextProps)
-    .filter(isProperty)
+    .filter(isEvent)
     .filter(isNewOrChange(prevProps, nextProps))
     .forEach((key) => {
       dom.removeEventListener(key.toLowerCase().slice(2), prevProps[key]);
       dom.addEventListener(key.toLowerCase().slice(2), nextProps[key]);
     });
+}
+
+function updateHostComponent(fiber) {
+  if (!fiber.dom) {
+    fiber.dom = createDom(fiber);
+  }
+  const elements = fiber.props.children;
+  reconcileChildren(fiber, elements);
+}
+
+/**
+ * 更新组件，触发重新渲染
+ */
+function updateFunctionComponent(fiber) {
+  // re-render component
+  wipFiber = fiber;
+  hookIndex = 0;
+  // fiber.hooks 通过索引排序用于收集所有 hook 对象，所以 hook 调用顺序必须保持稳定。
+  wipFiber.hooks = [];
+  // 执行函数组件时，会执行 useState, useEffect 等 hook。
+  const elements = [fiber.type(fiber.props)];
+  reconcileChildren(fiber, elements);
+}
+
+/**
+ * 实现 useState
+ */
+function useState(initial) {
+  const oldHook =
+    wipFiber.alternate &&
+    wipFiber.alternate.hooks &&
+    wipFiber.alternate.hooks[hookIndex];
+  const hook = {
+    state: oldHook ? oldHook.state : initial,
+    queue: [],
+  };
+
+  // 批量执行 actions， state 更新
+  const actions = oldHook ? oldHook.queue : [];
+  actions.forEach((action) => {
+    oldHook.queue.forEach((action) => action(hook.state));
+    hook.state = action(hook.state);
+  });
+
+  // 闭包函数，用有当前 hook 的引用
+  function setState(action) {
+    // 加入队列，重渲染的时候再批量执行 actions
+    hook.queue.push(action);
+    // 触发重新渲染
+    wipRoot = nextUnitOfWork = {
+      dom: currentRoot.dom,
+      props: currentRoot.props,
+      alternate: currentRoot,
+    };
+    deletions = [];
+    requestIdleCallback(workLoop);
+  }
+
+  wipFiber.hooks.push(hook);
+  hookIndex++;
+
+  return [hook.state, setState];
 }
 
 /**
@@ -97,14 +154,12 @@ function updateDom(dom, prevProps, nextProps) {
  *    - 若无返回父的兄弟即叔叔（uncle）
  */
 function performUnitOfWork(fiber) {
-  // 1
-  if (!fiber.dom) {
-    fiber.dom = createDom(fiber);
+  // 1 & 2
+  if (fiber.type instanceof Function) {
+    updateFunctionComponent(fiber);
+  } else {
+    updateHostComponent(fiber);
   }
-  // 2
-  const elements = fiber.props.children;
-  reconcileChildren(fiber, elements);
-
   // 3
   if (fiber.child) {
     return fiber.child;
@@ -127,7 +182,7 @@ function reconcileChildren(wipFiber, elements) {
   let index = 0;
   let prevSibling = null;
   let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
-  while (index < elements.length || oldFiber !== null) {
+  while (index < elements.length || oldFiber) {
     const element = elements[index];
     let newFiber = null;
     const sameType = oldFiber && element && oldFiber.type === element.type;
@@ -194,23 +249,39 @@ function commitWork(fiber) {
   if (!fiber) {
     return;
   }
-  const parentDom = fiber.parent.dom;
+  // 找到有真实 dom 的父节点
+  let domParentFiber = fiber.parent;
+  while (!domParentFiber.dom) {
+    domParentFiber = domParentFiber.parent;
+  }
+  const domParent = domParentFiber.dom;
   if (fiber.effectTag === 'PLACEMENT' && fiber.dom !== null) {
-    parentDom.appendChild(fiber.dom);
+    domParent.appendChild(fiber.dom);
   } else if (fiber.effectTag === 'UPDATE' && fiber.dom !== null) {
     // 更新属性
     updateDom(fiber.dom, fiber.alternate.props, fiber.props);
   } else if (fiber.effectTag === 'DELETION') {
-    parentDom.removeChild(fiber.dom);
+    commitDeletion(fiber, domParent);
   }
   commitWork(fiber.child);
   commitWork(fiber.sibling);
+}
+
+function commitDeletion(fiber, domParent) {
+  if (fiber.dom) {
+    // 找到有真实 dom 的子节点
+    domParent.removeChild(fiber.dom);
+  } else {
+    commitDeletion(fiber.child, domParent);
+  }
 }
 
 let nextUnitOfWork = null;
 let wipRoot = null;
 let currentRoot = null;
 let deletions = [];
+let wipFiber = null;
+let hookIndex = null;
 
 function workLoop(deadline) {
   let shouldYield = false;
@@ -240,24 +311,36 @@ function render(element, container) {
 const MyReact = {
   createElement,
   render,
+  useState,
 };
 
 // babel-plugin-react-jsx插件提供的注释，可指定自定义jsx转换方法
 /** @jsx MyReact.createElement */
-const element = (
-  <div id="foo">
-    <a id="bar" href="javascript;">
-      bar
-      <div id="bar1">bar1</div>
-      <div id="bar2">bar2</div>
-    </a>
-    <div id="baz">
-      <span id="baz1">baz1</span>
-      baz
-      <span id="baz2">baz2</span>
+
+function App(props) {
+  console.log('App component render');
+  const [counter, setCounter] = MyReact.useState(0);
+  return (
+    <div id="foo">
+      {props.name}
+      <button onClick={() => setCounter((counter) => ++counter)}>
+        {counter}
+      </button>
+      <a id="bar" href="javascript:void(0);">
+        ba;
+        <div id="bar1">bar1</div>
+        <div id="bar2">bar2</div>
+      </a>
+      <div id="baz">
+        <span id="baz1">baz1</span>
+        baz
+        <span id="baz2">baz2</span>
+      </div>
     </div>
-  </div>
-);
+  );
+}
+
+const element = <App name="I am a app component" />;
 
 console.log(element);
 
